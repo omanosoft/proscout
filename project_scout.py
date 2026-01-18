@@ -5,18 +5,21 @@ import threading
 import subprocess
 from pathlib import Path
 import csv
+from datetime import datetime
 
 class ProjectScoutApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Project Scout - Find Your Projects")
-        self.root.geometry("1000x600")
+        self.root.geometry("1200x600")
 
         self.projects = []
         self.scanning = False
         self.stop_requested = False
 
         self.found_paths = set()
+        self.status_update_counter = 0  # Counter for throttling status updates
+        self.projects_added_count = 0  # Counter for GUI refresh
         self.setup_ui()
 
     def setup_ui(self):
@@ -31,19 +34,25 @@ class ProjectScoutApp:
         self.scan_btn.pack(side=tk.RIGHT, padx=5)
 
         # Treeview for Projects
-        columns = ("name", "path", "type", "git", "status")
+        columns = ("name", "path", "type", "git", "status", "created", "modified")
         self.tree = ttk.Treeview(self.root, columns=columns, show="headings")
-        self.tree.heading("name", text="Project Name")
-        self.tree.heading("path", text="Directory Path")
-        self.tree.heading("type", text="Type")
-        self.tree.heading("git", text="Git")
-        self.tree.heading("status", text="Git Status")
+        self.tree.heading("name", text="Project Name", command=lambda: self.sort_by_column("name"))
+        self.tree.heading("path", text="Directory Path", command=lambda: self.sort_by_column("path"))
+        self.tree.heading("type", text="Type", command=lambda: self.sort_by_column("type"))
+        self.tree.heading("git", text="Git", command=lambda: self.sort_by_column("git"))
+        self.tree.heading("status", text="Git Status", command=lambda: self.sort_by_column("status"))
+        self.tree.heading("created", text="Created", command=lambda: self.sort_by_column("created"))
+        self.tree.heading("modified", text="Modified", command=lambda: self.sort_by_column("modified"))
 
         self.tree.column("name", width=120)
-        self.tree.column("path", width=400)
+        self.tree.column("path", width=350)
         self.tree.column("type", width=100)
         self.tree.column("git", width=50)
         self.tree.column("status", width=80)
+        self.tree.column("created", width=120)
+        self.tree.column("modified", width=120)
+        
+        self.sort_reverse = {}  # Track sort direction for each column
 
         self.tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
@@ -73,6 +82,8 @@ class ProjectScoutApp:
     def start_scan(self):
         self.projects = []
         self.found_paths = set()
+        self.status_update_counter = 0  # Reset counter
+        self.projects_added_count = 0  # Reset projects counter
         for i in self.tree.get_children():
             self.tree.delete(i)
         
@@ -84,32 +95,39 @@ class ProjectScoutApp:
         thread = threading.Thread(target=self.run_scanner, daemon=True)
         thread.start()
 
+    def is_network_drive(self, path):
+        """Check if path is on a network drive"""
+        try:
+            if os.name == 'nt':  # Windows
+                import ctypes
+                drive_type = ctypes.windll.kernel32.GetDriveTypeW(path)
+                # DRIVE_REMOTE = 4
+                return drive_type == 4
+        except:
+            pass
+        return False
+
     def run_scanner(self):
-        # Search priorities: Home, then C:, then D:, then others
+        # Search priorities: Home first, then D:, then others (skip network drives and C: initially)
+        # get_available_drives() already filters out network drives, so we can use them directly
         home = str(Path.home())
         drives = sorted(self.get_available_drives())
         
+        # Start with home folder and D: drive
         search_paths = [home]
-        # Add C: if it's not already covered by home (unlikely but for completeness)
-        # Usually we want to scan the whole C: excluding home if home was already scanned?
-        # Actually, simpler: just scan C: and D: after Home, and skip home-subfolders in C: scan.
         
+        # Add D: drive second if it exists
+        if "D:\\" in drives:
+            search_paths.append("D:\\")
+        
+        # Add other local drives (skip C: for now)
         for d in drives:
-            if d not in search_paths:
+            if d not in search_paths and d != "C:\\":
                 search_paths.append(d)
-
-        # Move C: to second position if it's there
-        if "C:\\" in search_paths:
-            search_paths.remove("C:\\")
-            search_paths.insert(1, "C:\\")
         
-        # Move D: to third position if it's there
-        if "D:\\" in search_paths:
-            search_paths.remove("D:\\")
-            if len(search_paths) > 2:
-                search_paths.insert(2, "D:\\")
-            else:
-                search_paths.append("D:\\")
+        # Add C: drive last (to avoid system folders that slow things down)
+        if "C:\\" in drives:
+            search_paths.append("C:\\")
 
         excluded_folders = {
             "windows", "program files", "program files (x86)", 
@@ -137,41 +155,72 @@ class ProjectScoutApp:
             if self.stop_requested: break
             if base_path.lower() in system_excludes: continue
             self.update_status(f"Scanning {base_path}...")
-            self.scan_directory(base_path, excluded_folders)
+            self.scan_directory(base_path, excluded_folders, depth=0)
 
         self.scanning = False
         self.root.after(0, lambda: self.scan_btn.config(text="Start Scan"))
         self.update_status("Scan complete.")
 
     def get_available_drives(self):
+        """Get available local drives, skipping network drives"""
         import string
         from ctypes import windll
         drives = []
         bitmask = windll.kernel32.GetLogicalDrives()
+        kernel32 = windll.kernel32
+        
         for letter in string.ascii_uppercase:
             if bitmask & 1:
                 path = f"{letter}:\\"
-                if os.path.exists(path):
-                    drives.append(path)
+                # Check drive type before checking if it exists
+                # This avoids hanging on network drives
+                try:
+                    drive_type = kernel32.GetDriveTypeW(path)
+                    # DRIVE_UNKNOWN = 0, DRIVE_NO_ROOT_DIR = 1, DRIVE_REMOVEABLE = 2
+                    # DRIVE_FIXED = 3, DRIVE_REMOTE = 4, DRIVE_CDROM = 5, DRIVE_RAMDISK = 6
+                    # Only include fixed (local) drives (3), skip network (4) and others
+                    if drive_type == 3:  # DRIVE_FIXED - local hard drive
+                        # Quick check if path exists (should be fast for local drives)
+                        try:
+                            if os.path.exists(path):
+                                drives.append(path)
+                        except (OSError, PermissionError):
+                            pass  # Skip if can't access
+                    # Skip all other drive types (network, CD-ROM, removable, etc.)
+                except Exception:
+                    pass  # Skip if GetDriveTypeW fails
             bitmask >>= 1
         return drives
+
+    def get_directory_dates(self, path):
+        """Get creation and modification dates of directory"""
+        try:
+            stat = os.stat(path)
+            created = datetime.fromtimestamp(stat.st_ctime).strftime("%Y-%m-%d %H:%M")
+            modified = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+            return created, modified
+        except Exception:
+            return "Unknown", "Unknown"
 
     def check_git_status(self, path):
         try:
             # git status --porcelain returns empty if clean, and lists files if dirty
-            # We use --ignore-submodules=dirty to be faster
+            # Use timeout and faster flags to prevent hanging
             result = subprocess.run(
-                ["git", "status", "--porcelain"],
+                ["git", "status", "--porcelain", "--ignore-submodules=dirty"],
                 cwd=path,
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=2,  # 2 second timeout to prevent hanging
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
             if result.returncode != 0:
                 return "Unknown"
             
             return "Dirty" if result.stdout.strip() else "Clean"
+        except subprocess.TimeoutExpired:
+            return "Timeout"
         except Exception:
             return "Error"
 
@@ -185,7 +234,80 @@ class ProjectScoutApp:
                     return True
         return False
 
-    def scan_directory(self, path, excluded_folders):
+    def is_subfolder_of_project(self, path):
+        """Check if this folder is a build/platform subfolder of a larger project"""
+        try:
+            parent_path = os.path.dirname(path)
+            parent_name = os.path.basename(parent_path).lower()
+            folder_name = os.path.basename(path).lower()
+            
+            # Flutter project subfolders: android, ios, web, macos, windows, linux
+            flutter_subfolders = {"android", "ios", "web", "macos", "windows", "linux"}
+            
+            if folder_name in flutter_subfolders:
+                # Check if parent has pubspec.yaml (Flutter project indicator)
+                pubspec_path = os.path.join(parent_path, "pubspec.yaml")
+                if os.path.exists(pubspec_path):
+                    return True
+            
+            # If inside android folder and parent's parent has pubspec.yaml (app folder in Flutter)
+            if parent_name == "android":
+                grandparent_path = os.path.dirname(parent_path)
+                pubspec_path = os.path.join(grandparent_path, "pubspec.yaml")
+                if os.path.exists(pubspec_path):
+                    return True
+            
+            # React Native project subfolders (android, ios)
+            if folder_name in {"android", "ios"}:
+                package_json_path = os.path.join(parent_path, "package.json")
+                if os.path.exists(package_json_path):
+                    try:
+                        with open(package_json_path, 'r', encoding='utf-8') as f:
+                            content = f.read().lower()
+                            if "react-native" in content:
+                                return True
+                    except:
+                        pass
+            
+            return False
+        except Exception:
+            return False
+
+    def format_path_for_display(self, path, max_depth=3):
+        """Format path for display showing only first max_depth levels"""
+        parts = Path(path).parts
+        if len(parts) <= max_depth + 1:
+            return path
+        # Show first max_depth parts, then last part if not too long
+        first_parts = list(parts[:max_depth])
+        last_part = parts[-1]
+        if len(last_part) > 30:
+            last_part = last_part[:27] + "..."
+        return os.path.join(*first_parts, "...", last_part)
+
+    def scan_directory(self, path, excluded_folders, depth=0):
+        # Update status more frequently - every folder at depth 0-2, every 5th at depth 3-5, etc.
+        self.status_update_counter += 1
+        should_update = False
+        
+        if depth <= 2:
+            should_update = True  # Always update for top 3 levels
+        elif depth == 3 and self.status_update_counter % 5 == 0:
+            should_update = True  # Every 5th folder at depth 3
+        elif depth == 4 and self.status_update_counter % 10 == 0:
+            should_update = True  # Every 10th folder at depth 4
+        elif depth <= 5 and self.status_update_counter % 20 == 0:
+            should_update = True  # Every 20th folder at depth 5
+        
+        if should_update:
+            display_path = self.format_path_for_display(path, max_depth=3)
+            self.update_status(f"Scanning: {display_path}... (Found: {self.projects_added_count})")
+            # Force GUI update to process the queue
+            try:
+                self.root.update_idletasks()
+            except:
+                pass
+        
         try:
             entries = list(os.scandir(path))
         except PermissionError:
@@ -222,31 +344,100 @@ class ProjectScoutApp:
         # Identification Logic
         if "package.json" in files_in_dir:
             is_project = True
-            project_type = "Node.js"
+            # Check for specific frameworks
+            if any(f in ["vite.config.js", "vite.config.ts"] for f in files_in_dir):
+                project_type = "Vite"
+            elif any(f in ["vue.config.js", "nuxt.config.js"] for f in files_in_dir):
+                project_type = "Vue.js"
+            elif any(f in ["angular.json"] for f in files_in_dir):
+                project_type = "Angular"
+            elif any(f in ["next.config.js", "next.config.ts"] for f in files_in_dir):
+                project_type = "Next.js"
+            elif any(f in ["svelte.config.js"] for f in files_in_dir):
+                project_type = "Svelte"
+            elif any(d.name in ["src", "public"] for d in dirs_in_dir) or any(f in ["tsconfig.json", "jsconfig.json"] for f in files_in_dir):
+                # Check if it's React by looking for common React indicators
+                package_json_path = os.path.join(path, "package.json")
+                if os.path.exists(package_json_path):
+                    try:
+                        with open(package_json_path, 'r', encoding='utf-8') as f:
+                            content = f.read().lower()
+                            if "react" in content or "react-scripts" in content:
+                                project_type = "React"
+                            else:
+                                project_type = "Node.js"
+                    except:
+                        project_type = "React"  # Default to React if we can't read
+                else:
+                    project_type = "React"
+            else:
+                project_type = "Node.js"
         elif "pubspec.yaml" in files_in_dir:
             is_project = True
             project_type = "Flutter"
-        elif any(f.endswith(".sln") or f.endswith(".csproj") for f in files_in_dir):
+        elif any(f.endswith(".sln") or f.endswith(".csproj") or f.endswith(".vbproj") for f in files_in_dir):
             is_project = True
             project_type = "C# / .NET"
-        elif any(f in ["requirements.txt", "pyproject.toml", "setup.py", "pipfile"] for f in files_in_dir):
+        elif any(f in ["requirements.txt", "pyproject.toml", "setup.py", "pipfile", "poetry.lock"] for f in files_in_dir):
             is_project = True
             project_type = "Python"
         elif any(f.endswith(".py") for f in files_in_dir) and len([f for f in files_in_dir if f.endswith(".py")]) > 1:
             is_project = True
             project_type = "Python Script"
-        elif "build.gradle" in files_in_dir:
+        elif "build.gradle" in files_in_dir or "build.gradle.kts" in files_in_dir:
+            # Check if this is part of a Flutter project
+            if self.is_subfolder_of_project(path):
+                is_project = False  # Skip as it's part of Flutter project
+            else:
+                is_project = True
+                project_type = "Android/Java/Kotlin"
+        elif "pom.xml" in files_in_dir:
             is_project = True
-            project_type = "Android/Java"
+            project_type = "Java/Maven"
         elif any(f.endswith(".xcodeproj") or f.endswith(".xcworkspace") for f in files_in_dir) or any(d.name.endswith(".xcodeproj") for d in dirs_in_dir):
+            # Check if this is part of a Flutter project
+            if self.is_subfolder_of_project(path):
+                is_project = False  # Skip as it's part of Flutter project
+            else:
+                is_project = True
+                project_type = "iOS"
+        elif any(f in ["go.mod", "go.sum"] for f in files_in_dir):
             is_project = True
-            project_type = "iOS"
+            project_type = "Go"
+        elif any(f in ["Cargo.toml"] for f in files_in_dir):
+            is_project = True
+            project_type = "Rust"
+        elif any(f in ["Gemfile"] for f in files_in_dir):
+            is_project = True
+            project_type = "Ruby"
+        elif any(f in ["composer.json"] for f in files_in_dir):
+            is_project = True
+            project_type = "PHP"
+        elif any(f in ["CMakeLists.txt"] for f in files_in_dir):
+            is_project = True
+            project_type = "C/C++"
+        elif any(f.endswith(".vcxproj") for f in files_in_dir):
+            is_project = True
+            project_type = "C++"
         elif "index.html" in files_in_dir:
-            is_project = True
-            project_type = "Web/HTML"
+            # Check if this is web folder in Flutter project
+            if self.is_subfolder_of_project(path):
+                is_project = False  # Skip as it's part of Flutter project
+            else:
+                is_project = True
+                project_type = "Web/HTML"
         elif "manage.py" in files_in_dir:
             is_project = True
             project_type = "Django"
+        elif any(f in ["mix.exs"] for f in files_in_dir):
+            is_project = True
+            project_type = "Elixir"
+        elif any(f in ["build.sbt"] for f in files_in_dir):
+            is_project = True
+            project_type = "Scala"
+        elif any(f in ["dub.json", "dub.sdl"] for f in files_in_dir):
+            is_project = True
+            project_type = "D"
         elif has_git: # If none of above but has git, it's a project
             is_project = True
             project_type = "Git Repo"
@@ -256,7 +447,8 @@ class ProjectScoutApp:
             if has_git:
                 git_status = self.check_git_status(path)
             
-            self.add_project(os.path.basename(path) or path, path, project_type, "Yes" if has_git else "No", git_status)
+            created_date, modified_date = self.get_directory_dates(path)
+            self.add_project(os.path.basename(path) or path, path, project_type, "Yes" if has_git else "No", git_status, created_date, modified_date)
             # Exclude subfolders ONLY if project has active git AND no subfolder has git
             if has_git:
                 has_subfolder_with_git = any(os.path.isdir(os.path.join(d.path, ".git")) for d in dirs_in_dir)
@@ -266,27 +458,87 @@ class ProjectScoutApp:
 
         for d in dirs_in_dir:
             if self.stop_requested: break
-            self.scan_directory(d.path, excluded_folders)
+            self.scan_directory(d.path, excluded_folders, depth=depth+1)
 
-    def add_project(self, name, path, p_type, git, status):
+    def add_project(self, name, path, p_type, git, status, created, modified):
         if path in self.found_paths:
             return
         self.found_paths.add(path)
+        self.projects_added_count += 1
         
         tags = []
         if git == "Yes":
             tags.append("git_yes")
         if status == "Dirty":
             tags.append("dirty")
-            
+        
+        # Capture values in closure to avoid late binding
+        values_tuple = (name, path, p_type, git, status, created, modified)
+        tags_tuple = tuple(tags)
+        
         # Inserting at index 0 if it's git, otherwise at the end
-        if git == "Yes":
-            self.root.after(0, lambda: self.tree.insert("", 0, values=(name, path, p_type, git, status), tags=tuple(tags)))
+        def insert_item():
+            try:
+                if git == "Yes":
+                    self.tree.insert("", 0, values=values_tuple, tags=tags_tuple)
+                else:
+                    self.tree.insert("", tk.END, values=values_tuple, tags=tags_tuple)
+            except:
+                pass
+        
+        self.root.after_idle(insert_item)
+        
+        # Force GUI update every 5 projects to show progress
+        if self.projects_added_count % 5 == 0:
+            try:
+                self.root.update_idletasks()
+            except:
+                pass
+
+    def sort_by_column(self, col):
+        """Sort treeview by column when header is clicked"""
+        items = [(self.tree.set(item, col), item) for item in self.tree.get_children("")]
+        
+        # Toggle sort direction
+        reverse = self.sort_reverse.get(col, False)
+        self.sort_reverse[col] = not reverse
+        
+        # Special handling for date columns and numeric columns
+        if col in ["created", "modified"]:
+            # Parse dates for proper sorting
+            def parse_date(item_tuple):
+                date_str, item = item_tuple
+                try:
+                    if date_str == "Unknown":
+                        return (datetime.min, item)
+                    return (datetime.strptime(date_str, "%Y-%m-%d %H:%M"), item)
+                except:
+                    return (datetime.min, item)
+            items.sort(key=parse_date, reverse=reverse)
         else:
-            self.root.after(0, lambda: self.tree.insert("", tk.END, values=(name, path, p_type, git, status), tags=tuple(tags)))
+            # Normal string sorting
+            items.sort(key=lambda x: x[0].lower() if x[0] else "", reverse=reverse)
+        
+        # Rearrange items in treeview
+        for index, (val, item) in enumerate(items):
+            self.tree.move(item, "", index)
+        
+        # Update column heading to show sort direction
+        if reverse:
+            self.tree.heading(col, text=self.tree.heading(col, "text").rstrip(" ▲▼") + " ▼")
+        else:
+            self.tree.heading(col, text=self.tree.heading(col, "text").rstrip(" ▲▼") + " ▲")
 
     def update_status(self, text):
-        self.root.after(0, lambda: self.status_label.config(text=text))
+        # Use after_idle to ensure GUI updates happen when idle, preventing queue buildup
+        # Capture text in lambda closure to avoid late binding issues
+        def update_label():
+            try:
+                self.status_label.config(text=text)
+                self.root.update_idletasks()
+            except:
+                pass
+        self.root.after_idle(update_label)
 
     def open_in_explorer(self):
         selected_item = self.tree.selection()
@@ -321,7 +573,7 @@ class ProjectScoutApp:
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.writer(csvfile)
                 # Write header
-                writer.writerow(["Project Name", "Directory Path", "Type", "Git", "Git Status"])
+                writer.writerow(["Project Name", "Directory Path", "Type", "Git", "Git Status", "Created", "Modified"])
                 
                 # Write all items from treeview
                 for item_id in items:
