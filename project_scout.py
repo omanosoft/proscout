@@ -1,9 +1,10 @@
 import os
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import threading
 import subprocess
 from pathlib import Path
+import csv
 
 class ProjectScoutApp:
     def __init__(self, root):
@@ -56,6 +57,7 @@ class ProjectScoutApp:
         bottom_frame.pack(fill=tk.X)
 
         ttk.Button(bottom_frame, text="Open in Explorer", command=self.open_in_explorer).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bottom_frame, text="Export to CSV", command=self.export_to_csv).pack(side=tk.LEFT, padx=5)
         
         # Color tags
         self.tree.tag_configure("git_yes", background="#e1f5fe") # Light blue for git projects
@@ -115,7 +117,14 @@ class ProjectScoutApp:
             "node_modules", "venv", ".venv", "__pycache__", ".git",
             "appdata", "local", "roaming", "microsoft", "cache"
             , "pictures", "music", "videos", "desktop", "links", ".cursor",
-            "favorites", "contacts", "searches", "saved games", "objects"
+            "favorites", "contacts", "searches", "saved games", "objects",
+            "$recycle.bin", "recycle.bin", "exception", "user data"
+        }
+        
+        # Portable browser name patterns (case insensitive check will be done)
+        self.portable_browser_patterns = {
+            "firefox", "chrome", "opera", "edge", "brave", "vivaldi",
+            "tor browser", "waterfox", "pale moon", "librewolf"
         }
         
         system_excludes = {
@@ -166,6 +175,16 @@ class ProjectScoutApp:
         except Exception:
             return "Error"
 
+    def is_portable_browser_folder(self, folder_name):
+        """Check if folder name indicates a portable browser"""
+        folder_lower = folder_name.lower()
+        # Check if folder contains "portable" and any browser name
+        if "portable" in folder_lower:
+            for browser in self.portable_browser_patterns:
+                if browser in folder_lower:
+                    return True
+        return False
+
     def scan_directory(self, path, excluded_folders):
         try:
             entries = list(os.scandir(path))
@@ -192,6 +211,8 @@ class ProjectScoutApp:
                     elif entry.name.startswith("."):
                         continue
                     elif name_lower in excluded_folders:
+                        continue
+                    elif self.is_portable_browser_folder(entry.name):
                         continue
                     else:
                         dirs_in_dir.append(entry)
@@ -236,9 +257,12 @@ class ProjectScoutApp:
                 git_status = self.check_git_status(path)
             
             self.add_project(os.path.basename(path) or path, path, project_type, "Yes" if has_git else "No", git_status)
-            # If we found a project, only scan subdirectories if they contain their own .git folder
-            # (as requested: skip subfolders of a project unless they have their own git)
-            dirs_in_dir = [d for d in dirs_in_dir if os.path.isdir(os.path.join(d.path, ".git"))]
+            # Exclude subfolders ONLY if project has active git AND no subfolder has git
+            if has_git:
+                has_subfolder_with_git = any(os.path.isdir(os.path.join(d.path, ".git")) for d in dirs_in_dir)
+                if not has_subfolder_with_git:
+                    # Exclude all subfolders - don't scan them
+                    dirs_in_dir = []
 
         for d in dirs_in_dir:
             if self.stop_requested: break
@@ -275,6 +299,38 @@ class ProjectScoutApp:
             os.startfile(project_path)
         else:
             messagebox.showerror("Error", f"Path not found: {project_path}")
+
+    def export_to_csv(self):
+        """Export all projects from treeview to CSV file"""
+        items = self.tree.get_children()
+        if not items:
+            messagebox.showwarning("Warning", "No projects to export. Please run a scan first.")
+            return
+        
+        # Ask user for file location
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            title="Save CSV file"
+        )
+        
+        if not filename:
+            return  # User cancelled
+        
+        try:
+            with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                # Write header
+                writer.writerow(["Project Name", "Directory Path", "Type", "Git", "Git Status"])
+                
+                # Write all items from treeview
+                for item_id in items:
+                    values = self.tree.item(item_id)['values']
+                    writer.writerow(values)
+            
+            messagebox.showinfo("Success", f"Projects exported successfully to:\n{filename}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export CSV file:\n{str(e)}")
 
 if __name__ == "__main__":
     root = tk.Tk()
