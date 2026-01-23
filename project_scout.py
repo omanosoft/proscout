@@ -3,6 +3,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading
 import subprocess
+import winreg
+import ctypes
 from pathlib import Path
 import csv
 from datetime import datetime
@@ -21,6 +23,8 @@ class ProjectScoutApp:
         self.status_update_counter = 0  # Counter for throttling status updates
         self.projects_added_count = 0  # Counter for GUI refresh
         self.setup_ui()
+        self.current_theme = self.get_system_theme()
+        self.apply_theme(self.current_theme)
 
     def setup_ui(self):
         # Top Controls
@@ -32,6 +36,9 @@ class ProjectScoutApp:
 
         self.scan_btn = ttk.Button(control_frame, text="Start Scan", command=self.toggle_scan)
         self.scan_btn.pack(side=tk.RIGHT, padx=5)
+
+        self.theme_btn = ttk.Button(control_frame, text="☾", width=3, command=self.toggle_theme)
+        self.theme_btn.pack(side=tk.RIGHT, padx=5)
 
         # Treeview for Projects
         columns = ("name", "path", "type", "git", "status", "created", "modified")
@@ -66,11 +73,88 @@ class ProjectScoutApp:
         bottom_frame.pack(fill=tk.X)
 
         ttk.Button(bottom_frame, text="Open in Explorer", command=self.open_in_explorer).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bottom_frame, text="Open with Antigravity", command=self.open_with_antigravity).pack(side=tk.LEFT, padx=5)
         ttk.Button(bottom_frame, text="Export to CSV", command=self.export_to_csv).pack(side=tk.LEFT, padx=5)
         
         # Color tags
         self.tree.tag_configure("git_yes", background="#e1f5fe") # Light blue for git projects
         self.tree.tag_configure("dirty", foreground="#d32f2f")   # Red text for uncommitted changes
+
+    def get_system_theme(self):
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            winreg.CloseKey(key)
+            return "Light" if value == 1 else "Dark"
+        except Exception:
+            return "Light"
+
+    def toggle_theme(self):
+        new_theme = "Dark" if self.current_theme == "Light" else "Light"
+        self.apply_theme(new_theme)
+
+    def apply_theme(self, theme):
+        self.current_theme = theme
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+        
+        if theme == "Dark":
+            bg = "#2b2b2b"
+            fg = "#ffffff"
+            field_bg = "#383838"
+            
+            self.root.configure(bg=bg)
+            style.configure(".", background=bg, foreground=fg, fieldbackground=field_bg)
+            style.configure("Treeview", background="#383838", foreground=fg, fieldbackground="#383838")
+            style.configure("Treeview.Heading", background="#404040", foreground=fg, relief="flat")
+            style.map("Treeview", background=[("selected", "#005a9e")])
+            
+            style.configure("TButton", background="#404040", foreground=fg, bordercolor="#505050")
+            style.map("TButton", background=[("active", "#505050")])
+            
+            # Update tags for Dark Mode
+            self.tree.tag_configure("git_yes", background="#1e3a50")
+            self.tree.tag_configure("dirty", foreground="#ff6b6b")
+            
+            if hasattr(self, 'theme_btn'):
+                self.theme_btn.config(text="☀")
+                
+            # Windows Title Bar Dark
+            try:
+                # DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+                value = ctypes.c_int(1)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
+            except:
+                pass
+                
+        else:
+            bg = "#f0f0f0"
+            fg = "#000000"
+            
+            self.root.configure(bg=bg)
+            style.configure(".", background=bg, foreground=fg)
+            style.configure("Treeview", background="white", foreground="black", fieldbackground="white")
+            style.configure("Treeview.Heading", background="#f0f0f0", foreground="black")
+            style.map("Treeview", background=[("selected", "#0078d7")])
+            
+            style.configure("TButton", background="#e1e1e1", foreground="black")
+            style.map("TButton", background=[("active", "#e5f1fb")])
+            
+            # Update tags for Light Mode
+            self.tree.tag_configure("git_yes", background="#e1f5fe")
+            self.tree.tag_configure("dirty", foreground="#d32f2f")
+            
+            if hasattr(self, 'theme_btn'):
+                self.theme_btn.config(text="☾")
+                
+            # Windows Title Bar Light
+            try:
+                hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+                value = ctypes.c_int(0)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
+            except:
+                pass
 
     def toggle_scan(self):
         if self.scanning:
@@ -240,43 +324,63 @@ class ProjectScoutApp:
         return False
 
     def is_subfolder_of_project(self, path):
-        """Check if this folder is a build/platform subfolder of a larger project"""
-        try:
-            parent_path = os.path.dirname(path)
-            parent_name = os.path.basename(parent_path).lower()
-            folder_name = os.path.basename(path).lower()
-            
-            # Flutter project subfolders: android, ios, web, macos, windows, linux
-            flutter_subfolders = {"android", "ios", "web", "macos", "windows", "linux"}
-            
-            if folder_name in flutter_subfolders:
-                # Check if parent has pubspec.yaml (Flutter project indicator)
-                pubspec_path = os.path.join(parent_path, "pubspec.yaml")
-                if os.path.exists(pubspec_path):
+        """Recursively check parent directories to see if this is part of a larger project"""
+        # Max levels to check up
+        max_levels = 8
+        current = path
+        
+        # Don't check the path itself, start with parent
+        parent = os.path.dirname(path)
+        
+        for _ in range(max_levels):
+            if parent == current: # Reached root drive
+                break
+                
+            # Check for project markers in this parent directory
+            try:
+                # Indicators that suggest the parent is the REAL project root
+                indicators = [
+                    ".git", "package.json", "composer.json", "pubspec.yaml",
+                    "go.mod", "Cargo.toml", "pom.xml", "manage.py", "requirements.txt",
+                    "mix.exs", "build.sbt", ".gitignore", "Makefile",
+                    "webpack.config.js", "rollup.config.js"
+                ]
+                
+                # Check for WordPress Theme (style.css + functions.php)
+                if os.path.exists(os.path.join(parent, "style.css")) and \
+                   os.path.exists(os.path.join(parent, "functions.php")):
                     return True
-            
-            # If inside android folder and parent's parent has pubspec.yaml (app folder in Flutter)
-            if parent_name == "android":
-                grandparent_path = os.path.dirname(parent_path)
-                pubspec_path = os.path.join(grandparent_path, "pubspec.yaml")
-                if os.path.exists(pubspec_path):
+                
+                # Check for standard indicators
+                for indicator in indicators:
+                    if os.path.exists(os.path.join(parent, indicator)):
+                        return True
+                        
+                # Check if parent has a "src" directory (strong indicator of project root)
+                if os.path.exists(os.path.join(parent, "src")) and os.path.isdir(os.path.join(parent, "src")):
                     return True
+
+                # Check for Visual Studio Solution in parent
+                if any(f.endswith(".sln") for f in os.listdir(parent)):
+                    return True
+
+                # Check if parent matches "folder/folder.php" (WP Plugin) pattern
+                parent_name = os.path.basename(parent).lower()
+                clean_name = parent_name.replace("-master", "").replace("-main", "")
+                
+                # Check for exact match or cleaned match
+                if os.path.exists(os.path.join(parent, f"{parent_name}.php")) or \
+                   os.path.exists(os.path.join(parent, f"{clean_name}.php")):
+                    return True
+                        
+            except (PermissionError, OSError):
+                pass
             
-            # React Native project subfolders (android, ios)
-            if folder_name in {"android", "ios"}:
-                package_json_path = os.path.join(parent_path, "package.json")
-                if os.path.exists(package_json_path):
-                    try:
-                        with open(package_json_path, 'r', encoding='utf-8') as f:
-                            content = f.read().lower()
-                            if "react-native" in content:
-                                return True
-                    except:
-                        pass
+            # Move up
+            current = parent
+            parent = os.path.dirname(current)
             
-            return False
-        except Exception:
-            return False
+        return False
 
     def format_path_for_display(self, path, max_depth=3):
         """Format path for display showing only first max_depth levels"""
@@ -438,8 +542,13 @@ class ProjectScoutApp:
             is_project = True
             project_type = "Flutter"
         elif any(f.endswith(".sln") or f.endswith(".csproj") or f.endswith(".vbproj") for f in files_in_dir):
-            is_project = True
-            project_type = "C# / .NET"
+            if self.is_subfolder_of_project(path):
+                # If we are in a subfolder (e.g. csproj inside a sln folder), skip it
+                # UNLESS it is the SLN folder itself (which won't be a subfolder of another sln typically)
+                is_project = False
+            else:
+                is_project = True
+                project_type = "C# / .NET"
         elif any(f in ["requirements.txt", "pyproject.toml", "setup.py", "pipfile", "poetry.lock"] for f in files_in_dir):
             is_project = True
             project_type = "Python"
@@ -472,9 +581,37 @@ class ProjectScoutApp:
         elif any(f in ["Gemfile"] for f in files_in_dir):
             is_project = True
             project_type = "Ruby"
-        elif any(f in ["composer.json"] for f in files_in_dir):
-            is_project = True
-            project_type = "PHP"
+        elif any(f in ["composer.json"] for f in files_in_dir) or any(f.endswith(".php") for f in files_in_dir):
+            if self.is_subfolder_of_project(path):
+                is_project = False
+            else:
+                is_php = False
+                if "composer.json" in files_in_dir:
+                    is_php = True
+                else:
+                    # Check for substantial PHP files to avoid false positives
+                    php_files = [f for f in files_in_dir if f.endswith(".php")]
+                    folder_name = os.path.basename(path).lower()
+                    
+                    # WordPress Plugin pattern: folder/folder.php or folder/folder-plugin.php
+                    # Also check for cleaned names (removing -master suffix)
+                    clean_name = folder_name.replace("-master", "").replace("-main", "")
+                    
+                    if f"{folder_name}.php" in php_files or f"{clean_name}.php" in php_files:
+                        is_php = True
+                    # Standard web entry point
+                    elif "index.php" in php_files:
+                         is_php = True
+                    # Project likely has a src folder and some php files
+                    elif os.path.exists(os.path.join(path, "src")) and os.path.isdir(os.path.join(path, "src")):
+                         is_php = True
+                    # Multiple PHP files likely mean a project (but careful with this if it's a subfolder)
+                    elif len(php_files) > 1:
+                         is_php = True
+                
+                if is_php:
+                    is_project = True
+                    project_type = "PHP"
         elif any(f in ["CMakeLists.txt"] for f in files_in_dir):
             is_project = True
             project_type = "C/C++"
@@ -618,6 +755,27 @@ class ProjectScoutApp:
             os.startfile(project_path)
         else:
             messagebox.showerror("Error", f"Path not found: {project_path}")
+
+    def open_with_antigravity(self):
+        selected_item = self.tree.selection()
+        if not selected_item:
+            messagebox.showwarning("Warning", "Please select a project first.")
+            return
+            
+        project_path = self.tree.item(selected_item[0])['values'][1]
+        
+        # Don't check for existence strictly, the tool might handle it or it might be remote/container based
+        # But safest is to check exists locally first for this use case
+        if not os.path.exists(project_path):
+             messagebox.showerror("Error", f"Path not found: {project_path}")
+             return
+
+        try:
+            # Use Popen to launch and not block
+            # Only support Windows per user OS
+            subprocess.Popen(f'antigravity "{project_path}"', shell=True)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to launch Antigravity:\n{str(e)}")
 
     def export_to_csv(self):
         """Export all projects from treeview to CSV file"""
