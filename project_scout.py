@@ -136,7 +136,12 @@ class ProjectScoutApp:
             "appdata", "local", "roaming", "microsoft", "cache"
             , "pictures", "music", "videos", "desktop", "links", ".cursor",
             "favorites", "contacts", "searches", "saved games", "objects",
-            "$recycle.bin", "recycle.bin", "exception", "user data"
+            "$recycle.bin", "recycle.bin", "exception", "user data",
+            # WordPress/CMS folders that generate false positives
+            "uploads", "plugins", "themes", "wp-content", "wp-includes", "wp-admin",
+            "vendor", "assets", "libs", "lib", "libraries", "documentation",
+            # Build folders
+            "dist", "build", "target", "out", "bin", "obj"
         }
         
         # Portable browser name patterns (case insensitive check will be done)
@@ -285,6 +290,63 @@ class ProjectScoutApp:
             last_part = last_part[:27] + "..."
         return os.path.join(*first_parts, "...", last_part)
 
+    def is_vendor_or_library_folder(self, path, folder_name):
+        """Check if folder is likely a vendor/library folder, not a real project"""
+        folder_lower = folder_name.lower()
+        path_lower = path.lower()
+        
+        # Common vendor/library folder patterns
+        vendor_patterns = [
+            "vendor", "vendors", "third-party", "thirdparty", "external",
+            "packages", "libs", "libraries", "dependencies",
+            "bower_components", "jspm_packages",
+            "mode", "modes",  # CodeMirror modes
+            "addons", "add-ons", "plugins", "extensions", "modules"
+        ]
+        
+        # Check if folder name matches vendor patterns
+        if any(pattern in folder_lower for pattern in vendor_patterns):
+            return True
+        
+        # Check if path contains WordPress/CMS indicators
+        cms_indicators = [
+            "wp-content", "wordpress", "joomla", "drupal", "elementor",
+            "essential-addons", "epic-news", "eventful", "astra"
+        ]
+        if any(indicator in path_lower for indicator in cms_indicators):
+            return True
+        
+        # Check if it's a documentation folder with only index.html
+        if "documentation" in folder_lower or "docs" == folder_lower:
+            return True
+            
+        return False
+
+    def has_substantial_project_files(self, path, files_in_dir, project_type):
+        """Check if folder has substantial project files, not just one index.html"""
+        
+        # For HTML projects, require more than just index.html
+        if project_type == "Web/HTML":
+            # Check if there are other meaningful files
+            html_files = [f for f in files_in_dir if f.endswith(".html")]
+            js_files = [f for f in files_in_dir if f.endswith(".js")]
+            css_files = [f for f in files_in_dir if f.endswith(".css")]
+            
+            # If only index.html exists with no other meaningful files, skip it
+            if len(html_files) == 1 and len(js_files) == 0 and len(css_files) == 0:
+                return False
+                
+            # Check for common non-project patterns
+            folder_name = os.path.basename(path).lower()
+            non_project_names = [
+                "mode", "modes", "theme", "addon", "plugin", "extension",
+                "help", "about", "documentation", "demo", "example", "sample"
+            ]
+            if any(name in folder_name for name in non_project_names):
+                return False
+        
+        return True
+
     def scan_directory(self, path, excluded_folders, depth=0):
         # Update status more frequently - every folder at depth 0-2, every 5th at depth 3-5, etc.
         self.status_update_counter += 1
@@ -423,6 +485,11 @@ class ProjectScoutApp:
             # Check if this is web folder in Flutter project
             if self.is_subfolder_of_project(path):
                 is_project = False  # Skip as it's part of Flutter project
+            # Check if it's a vendor/library folder or lacks substantial files
+            elif self.is_vendor_or_library_folder(path, os.path.basename(path)):
+                is_project = False
+            elif not self.has_substantial_project_files(path, files_in_dir, "Web/HTML"):
+                is_project = False
             else:
                 is_project = True
                 project_type = "Web/HTML"
