@@ -72,6 +72,7 @@ class ProjectScoutApp:
         bottom_frame = ttk.Frame(self.root, padding="10")
         bottom_frame.pack(fill=tk.X)
 
+        ttk.Button(bottom_frame, text="Run Project", command=self.run_project).pack(side=tk.LEFT, padx=5)
         ttk.Button(bottom_frame, text="Open in Explorer", command=self.open_in_explorer).pack(side=tk.LEFT, padx=5)
         ttk.Button(bottom_frame, text="Open with Antigravity", command=self.open_with_antigravity).pack(side=tk.LEFT, padx=5)
         ttk.Button(bottom_frame, text="Export to CSV", command=self.export_to_csv).pack(side=tk.LEFT, padx=5)
@@ -808,6 +809,117 @@ class ProjectScoutApp:
             messagebox.showinfo("Success", f"Projects exported successfully to:\n{filename}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export CSV file:\n{str(e)}")
+
+    def run_project(self):
+        selected_item = self.tree.selection()
+        if not selected_item:
+            messagebox.showwarning("Warning", "Please select a project first.")
+            return
+
+        item = self.tree.item(selected_item[0])
+        path = item['values'][1]
+        
+        # Get project type from the tree items if possible, or re-evaluate
+        # The tree values are: name, path, type, git, status, created, modified
+        project_type = item['values'][2]
+
+        if not os.path.exists(path):
+            messagebox.showerror("Error", f"Path not found: {path}")
+            return
+
+        command = self.detect_run_command(path, project_type)
+        if not command:
+            messagebox.showinfo("Info", f"Could not determine how to run this {project_type} project automatically.\nOpening terminal instead.")
+            command = "cmd /k" if os.name == 'nt' else "bash"
+
+        try:
+            # Open in new terminal window
+            if os.name == 'nt':
+                # cmd /k keeps the window open after command execution
+                # If command is already "cmd /k", don't double wrap it
+                if not command.startswith("cmd /k"):
+                    full_cmd = f'cmd /k "{command}"'
+                else:
+                    full_cmd = command
+                
+                subprocess.Popen(full_cmd, cwd=path, creationflags=subprocess.CREATE_NEW_CONSOLE)
+            else:
+                # For Linux/Mac - this is a basic attempt, might need x-terminal-emulator or open -a Terminal
+                subprocess.Popen(command, cwd=path, shell=True)
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to run project:\n{str(e)}")
+
+    def detect_run_command(self, path, project_type):
+        """Detect the command to run the project based on type and files"""
+        files = []
+        try:
+            files = os.listdir(path)
+        except:
+            pass
+
+        files_lower = [f.lower() for f in files]
+
+        # 1. Node.js / Web Frameworks
+        if project_type in ["Node.js", "React", "Vue.js", "Next.js", "Angular", "Svelte", "Vite"]:
+            if "package.json" in files_lower:
+                try:
+                    import json
+                    files_real_names = {f.lower(): f for f in files}
+                    with open(os.path.join(path, files_real_names["package.json"]), 'r', errors='ignore') as f:
+                        pkg = json.load(f)
+                        scripts = pkg.get("scripts", {})
+                        
+                        # Preferred scripts in order
+                        for script in ["dev", "start", "serve", "watch"]:
+                            if script in scripts:
+                                return f"npm run {script}"
+                except:
+                    pass
+            return "npm start" # Fallback
+
+        # 2. .NET / C#
+        if "C#" in project_type or ".NET" in project_type:
+            # Check if there is a csproj
+            if any(f.endswith(".csproj") for f in files_lower):
+                return "dotnet run"
+            # TODO: Check binary folder?
+            return "dotnet run"
+
+        # 3. Python
+        if "Python" in project_type or "Django" in project_type:
+            if "manage.py" in files_lower:
+                return "python manage.py runserver"
+            
+            # Look for main entry points
+            for main in ["main.py", "app.py", "run.py", "start.py"]:
+                if main in files_lower:
+                    return f"python {main}"
+            
+            # If no obvious entry point but .py files exist, just open python?
+            # Or maybe just open terminal
+            return None
+
+        # 4. Flutter
+        if project_type == "Flutter":
+            return "flutter run"
+
+        # 5. Go
+        if project_type == "Go":
+            return "go run ."
+
+        # 6. Rust
+        if project_type == "Rust":
+            return "cargo run"
+            
+        # 7. PHP / Laravel
+        if "PHP" in project_type:
+            if "artisan" in files_lower:
+                 return "php artisan serve"
+            if "index.php" in files_lower:
+                return "php -S localhost:8000"
+
+        return None
 
 if __name__ == "__main__":
     root = tk.Tk()
