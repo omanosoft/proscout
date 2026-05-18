@@ -119,6 +119,7 @@ The application is optimized for fast scanning:
 - **Skips network drives** - Automatically detects and skips network drives
 - **Skips system folders** - Windows, Program Files, etc.
 - **Skips build folders** - node_modules, venv, .git, etc.
+- **Skips Go module cache** - Ignores packages under go/pkg/mod
 - **Skips portable browsers** - Firefox Portable, Chrome Portable, etc.
 - **Flutter subfolder filtering** - Doesn't display android/, ios/, web/ folders as separate projects
 - **Git timeout** - Git status check has 2 seconds timeout to not block scanning
@@ -139,6 +140,7 @@ The application automatically skips the following folders:
 - Build folders: `node_modules`, `venv`, `.venv`, `__pycache__`, `.git`
 - User folders: `appdata`, `cache`, `pictures`, `music`, `videos`, `desktop`
 - Other: `$recycle.bin`, `recycle.bin`, `exception`, `user data`
+- Path-based: folders under `go/pkg/mod`
 
 ### Git Status Check
 

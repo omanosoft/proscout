@@ -122,6 +122,10 @@ excluded_folders = {
 }
 ```
 
+### Path-based exclusions:
+
+- Go module cache paths containing `go/pkg/mod`
+
 ### Portable browsers:
 
 Detected by name containing "portable" + browser name (firefox, chrome, opera, edge, brave, vivaldi, etc.)

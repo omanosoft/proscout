@@ -324,6 +324,14 @@ class ProjectScoutApp:
                     return True
         return False
 
+    def is_go_module_cache_path(self, path):
+        """Check if path is inside Go's module cache (go/pkg/mod)."""
+        parts = [part.lower() for part in Path(path).parts]
+        for i in range(len(parts) - 2):
+            if parts[i:i + 3] == ["go", "pkg", "mod"]:
+                return True
+        return False
+
     def is_subfolder_of_project(self, path):
         """Recursively check parent directories to see if this is part of a larger project"""
         # Max levels to check up
@@ -453,6 +461,9 @@ class ProjectScoutApp:
         return True
 
     def scan_directory(self, path, excluded_folders, depth=0):
+        if self.is_go_module_cache_path(path):
+            return
+
         # Update status more frequently - every folder at depth 0-2, every 5th at depth 3-5, etc.
         self.status_update_counter += 1
         should_update = False
@@ -500,6 +511,8 @@ class ProjectScoutApp:
                     elif entry.name.startswith("."):
                         continue
                     elif name_lower in excluded_folders:
+                        continue
+                    elif self.is_go_module_cache_path(entry.path):
                         continue
                     elif self.is_portable_browser_folder(entry.name):
                         continue
@@ -833,6 +846,16 @@ class ProjectScoutApp:
             command = "cmd /k" if os.name == 'nt' else "bash"
 
         try:
+            # Check if this is a browser open command
+            if command.startswith("OPEN_IN_BROWSER:"):
+                html_path = command.replace("OPEN_IN_BROWSER:", "")
+                if os.path.exists(html_path):
+                    import webbrowser
+                    webbrowser.open(f"file:///{html_path}")
+                else:
+                    messagebox.showerror("Error", f"HTML file not found: {html_path}")
+                return
+            
             # Open in new terminal window
             if os.name == 'nt':
                 # cmd /k keeps the window open after command execution
@@ -849,6 +872,114 @@ class ProjectScoutApp:
                 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to run project:\n{str(e)}")
+
+    def find_built_exe(self, path):
+        """Search for already built exe files in bin/Debug or bin/Release folders"""
+        possible_paths = [
+            os.path.join(path, "bin", "Debug"),
+            os.path.join(path, "bin", "Release"),
+            os.path.join(path, "bin", "Debug", "net8.0"),
+            os.path.join(path, "bin", "Debug", "net7.0"),
+            os.path.join(path, "bin", "Debug", "net6.0"),
+            os.path.join(path, "bin", "Release", "net8.0"),
+            os.path.join(path, "bin", "Release", "net7.0"),
+            os.path.join(path, "bin", "Release", "net6.0"),
+        ]
+        
+        # Also check subfolders for csproj projects
+        try:
+            for entry in os.scandir(path):
+                if entry.is_dir() and not entry.name.startswith('.'):
+                    for subpath in ["bin/Debug", "bin/Release"]:
+                        full_subpath = os.path.join(entry.path, subpath)
+                        if os.path.exists(full_subpath):
+                            possible_paths.append(full_subpath)
+                            # Add .NET version subfolders
+                            for net_ver in ["net8.0", "net7.0", "net6.0", "net5.0", "netcoreapp3.1"]:
+                                net_path = os.path.join(full_subpath, net_ver)
+                                if os.path.exists(net_path):
+                                    possible_paths.append(net_path)
+        except:
+            pass
+        
+        for bin_path in possible_paths:
+            if os.path.exists(bin_path):
+                try:
+                    for f in os.listdir(bin_path):
+                        if f.lower().endswith(".exe"):
+                            return os.path.join(bin_path, f)
+                except:
+                    pass
+        return None
+
+    def get_html_files(self, path):
+        """Get all HTML files in the project folder"""
+        html_files = []
+        try:
+            for f in os.listdir(path):
+                if f.lower().endswith(".html"):
+                    html_files.append(f)
+        except:
+            pass
+        return html_files
+
+    def show_html_selection_dialog(self, path, html_files):
+        """Show dialog to select which HTML file to open"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Odaberi HTML fajl")
+        dialog.geometry("400x300")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center the dialog
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (dialog.winfo_width() // 2)
+        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        ttk.Label(dialog, text="Nema index.html. Odaberi HTML fajl za pokretanje:", padding=10).pack()
+        
+        # Listbox with scrollbar
+        frame = ttk.Frame(dialog)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        scrollbar = ttk.Scrollbar(frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        listbox = tk.Listbox(frame, yscrollcommand=scrollbar.set, font=("Consolas", 10))
+        listbox.pack(fill=tk.BOTH, expand=True)
+        scrollbar.config(command=listbox.yview)
+        
+        for html_file in sorted(html_files):
+            listbox.insert(tk.END, html_file)
+        
+        if html_files:
+            listbox.selection_set(0)
+        
+        selected_file = [None]  # Use list to allow modification in nested function
+        
+        def on_open():
+            selection = listbox.curselection()
+            if selection:
+                selected_file[0] = html_files[selection[0]]
+            dialog.destroy()
+        
+        def on_cancel():
+            dialog.destroy()
+        
+        def on_double_click(event):
+            on_open()
+        
+        listbox.bind('<Double-1>', on_double_click)
+        
+        btn_frame = ttk.Frame(dialog, padding=10)
+        btn_frame.pack(fill=tk.X)
+        
+        ttk.Button(btn_frame, text="Otvori", command=on_open).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Odustani", command=on_cancel).pack(side=tk.LEFT, padx=5)
+        
+        dialog.wait_window()
+        return selected_file[0]
 
     def detect_run_command(self, path, project_type):
         """Detect the command to run the project based on type and files"""
@@ -878,13 +1009,15 @@ class ProjectScoutApp:
                     pass
             return "npm start" # Fallback
 
-        # 2. .NET / C#
+        # 2. .NET / C# - Check for existing exe first, then build if needed
         if "C#" in project_type or ".NET" in project_type:
-            # Check if there is a csproj
-            if any(f.endswith(".csproj") for f in files_lower):
-                return "dotnet run"
-            # TODO: Check binary folder?
-            return "dotnet run"
+            exe_path = self.find_built_exe(path)
+            if exe_path:
+                # Run the existing exe directly
+                return f'"{exe_path}"'
+            else:
+                # No exe found - build and run
+                return "dotnet build && dotnet run"
 
         # 3. Python
         if "Python" in project_type or "Django" in project_type:
@@ -918,6 +1051,29 @@ class ProjectScoutApp:
                  return "php artisan serve"
             if "index.php" in files_lower:
                 return "php -S localhost:8000"
+
+        # 8. Web/HTML - Check for index.html or offer selection
+        if project_type == "Web/HTML":
+            html_files = self.get_html_files(path)
+            if not html_files:
+                return None
+            
+            # If only one HTML file exists, use it regardless of name
+            if len(html_files) == 1:
+                html_file = html_files[0]
+                return f"OPEN_IN_BROWSER:{os.path.join(path, html_file)}"
+            
+            # If index.html exists, use it
+            if "index.html" in [f.lower() for f in html_files]:
+                for f in html_files:
+                    if f.lower() == "index.html":
+                        return f"OPEN_IN_BROWSER:{os.path.join(path, f)}"
+            
+            # Multiple HTML files but no index.html - show selection dialog
+            selected = self.show_html_selection_dialog(path, html_files)
+            if selected:
+                return f"OPEN_IN_BROWSER:{os.path.join(path, selected)}"
+            return None
 
         return None
 
